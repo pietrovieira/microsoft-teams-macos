@@ -30,6 +30,10 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Microsoft Teams precisa de acesso à câmera para chamadas de vídeo.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Microsoft Teams precisa de acesso ao microfone para chamadas de áudio.</string>
 	<key>NSUserNotificationAlertStyle</key>
 	<string>alert</string>
 </dict>
