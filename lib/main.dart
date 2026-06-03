@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -36,16 +37,22 @@ class _TeamsHomePageState extends State<TeamsHomePage>
     with WidgetsBindingObserver {
   late final WebViewController _controller;
   late final MethodChannel _platformChannel;
+  SharedPreferences? _prefs;
   Timer? _keepAliveTimer;
   Timer? _reloadTimer;
   bool _isLoading = true;
   double _progress = 0;
+  bool _permissionsGranted = false;
+  bool _pageLoaded = false;
+
+  static const String _kNotificationPermissionKey = 'notification_permission_granted';
+  static const String _kMediaPermissionKey = 'media_permission_granted';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-
+    _initPrefs();
     _setupPlatformChannel();
 
     _controller = WebViewController()
@@ -54,6 +61,17 @@ class _TeamsHomePageState extends State<TeamsHomePage>
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
         'AppleWebKit/537.36 (KHTML, like Gecko) '
         'Chrome/125.0.0.0 Safari/537.36',
+      )
+      ..addJavaScriptChannel(
+        'TeamsApp',
+        onMessageReceived: (JavaScriptMessage message) {
+          final data = message.message;
+          if (data == 'notification_granted') {
+            _markNotificationPermissionGranted();
+          } else if (data == 'media_granted') {
+            _markMediaPermissionGranted();
+          }
+        },
       )
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -64,6 +82,7 @@ class _TeamsHomePageState extends State<TeamsHomePage>
           onPageFinished: (url) {
             debugPrint('Page finished: $url');
             setState(() => _isLoading = false);
+            _pageLoaded = true;
             _onPageLoaded();
           },
           onProgress: (progress) {
@@ -79,6 +98,10 @@ class _TeamsHomePageState extends State<TeamsHomePage>
         ),
       )
       ..loadRequest(Uri.parse('https://teams.cloud.microsoft/'));
+  }
+
+  Future<void> _initPrefs() async {
+    _prefs = await SharedPreferences.getInstance();
   }
 
   void _setupPlatformChannel() {
@@ -99,7 +122,7 @@ class _TeamsHomePageState extends State<TeamsHomePage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _startKeepAlive();
-      _controller.loadRequest(Uri.parse('https://teams.cloud.microsoft/'));
+      // Nao recarrega o webview ao voltar ao app para nao perder estado
     } else {
       _keepAliveTimer?.cancel();
     }
@@ -113,11 +136,50 @@ class _TeamsHomePageState extends State<TeamsHomePage>
     _cancelReload();
   }
 
+  Future<bool> _shouldRequestNotificationPermission() async {
+    if (_prefs == null) return true;
+    final granted = _prefs!.getBool(_kNotificationPermissionKey);
+    if (granted == true) return false;
+    return true;
+  }
+
+  Future<void> _markNotificationPermissionGranted() async {
+    if (_prefs == null) return;
+    await _prefs!.setBool(_kNotificationPermissionKey, true);
+  }
+
+  Future<bool> _shouldRequestMediaPermission() async {
+    if (_prefs == null) return true;
+    final granted = _prefs!.getBool(_kMediaPermissionKey);
+    if (granted == true) return false;
+    return true;
+  }
+
+  Future<void> _markMediaPermissionGranted() async {
+    if (_prefs == null) return;
+    await _prefs!.setBool(_kMediaPermissionKey, true);
+  }
+
   Future<void> _injectNotificationHandler() async {
+    final shouldRequest = await _shouldRequestNotificationPermission();
+    if (!shouldRequest) return;
+
     await _controller.runJavaScript('''
       (function() {
-        if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-          Notification.requestPermission();
+        if (typeof Notification !== 'undefined') {
+          if (Notification.permission === 'default') {
+            Notification.requestPermission().then(function(permission) {
+              if (permission === 'granted') {
+                if (window.TeamsApp) {
+                  window.TeamsApp.postMessage('notification_granted');
+                }
+              }
+            });
+          } else if (Notification.permission === 'granted') {
+            if (window.TeamsApp) {
+              window.TeamsApp.postMessage('notification_granted');
+            }
+          }
         }
       })();
     ''');
@@ -141,18 +203,47 @@ class _TeamsHomePageState extends State<TeamsHomePage>
   }
 
   Future<void> _requestMediaAccess() async {
+    final shouldRequest = await _shouldRequestMediaPermission();
+    if (!shouldRequest) return;
+
     const js = '''
       (function() {
         try {
-          navigator.mediaDevices.getUserMedia({ audio: true, video: true })
-            .then(function(stream) {
-              stream.getTracks().forEach(function(track) { track.stop(); });
-              return true;
-            })
-            .catch(function(e) {
-              console.error('Media permission denied:', e);
-              return false;
+          var checkAndRequest = function() {
+            navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+              .then(function(stream) {
+                stream.getTracks().forEach(function(track) { track.stop(); });
+                if (window.TeamsApp) {
+                  window.TeamsApp.postMessage('media_granted');
+                }
+                return true;
+              })
+              .catch(function(e) {
+                console.error('Media permission denied:', e);
+                return false;
+              });
+          };
+          
+          if (navigator.permissions && navigator.permissions.query) {
+            Promise.all([
+              navigator.permissions.query({name: 'camera'}).catch(function() { return {state: 'prompt'}; }),
+              navigator.permissions.query({name: 'microphone'}).catch(function() { return {state: 'prompt'}; })
+            ]).then(function(results) {
+              var cameraState = results[0].state;
+              var micState = results[1].state;
+              if (cameraState === 'granted' && micState === 'granted') {
+                if (window.TeamsApp) {
+                  window.TeamsApp.postMessage('media_granted');
+                }
+              } else if (cameraState !== 'denied' && micState !== 'denied') {
+                checkAndRequest();
+              }
+            }).catch(function() {
+              checkAndRequest();
             });
+          } else {
+            checkAndRequest();
+          }
         } catch(e) {
           console.error('Media request error:', e);
         }
@@ -164,14 +255,17 @@ class _TeamsHomePageState extends State<TeamsHomePage>
   void _startKeepAlive() {
     _keepAliveTimer?.cancel();
     _keepAliveTimer = Timer.periodic(
-      const Duration(minutes: 3),
+      const Duration(seconds: 30),
       (_) => _injectActivity(),
     );
+    // Executa imediatamente uma vez
+    _injectActivity();
   }
 
   Future<void> _injectActivity() async {
     await _controller.runJavaScript('''
       (function() {
+        // Simula movimento do mouse
         document.dispatchEvent(new MouseEvent('mousemove', {
           view: window,
           bubbles: true,
@@ -179,11 +273,48 @@ class _TeamsHomePageState extends State<TeamsHomePage>
           clientX: Math.random() * window.innerWidth,
           clientY: Math.random() * window.innerHeight
         }));
+        
+        // Simula tecla pressionada
         document.dispatchEvent(new KeyboardEvent('keydown', {
           key: 'Shift',
           code: 'ShiftLeft',
           bubbles: true
         }));
+        document.dispatchEvent(new KeyboardEvent('keyup', {
+          key: 'Shift',
+          code: 'ShiftLeft',
+          bubbles: true
+        }));
+        
+        // Simula scroll sutil
+        window.scrollBy(0, 0);
+        
+        // Dispara evento de foco
+        window.dispatchEvent(new Event('focus'));
+        document.dispatchEvent(new Event('focus'));
+        
+        // Simula click em um elemento neutro
+        var body = document.body;
+        if (body) {
+          body.dispatchEvent(new MouseEvent('click', {
+            view: window,
+            bubbles: true,
+            cancelable: true,
+            clientX: 0,
+            clientY: 0
+          }));
+        }
+        
+        // Atualiza visibility state
+        Object.defineProperty(document, 'visibilityState', {
+          value: 'visible',
+          writable: true
+        });
+        Object.defineProperty(document, 'hidden', {
+          value: false,
+          writable: true
+        });
+        document.dispatchEvent(new Event('visibilitychange'));
       })();
     ''');
   }
