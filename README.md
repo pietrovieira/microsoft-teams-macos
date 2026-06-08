@@ -8,6 +8,10 @@ A lightweight, unofficial Microsoft Teams desktop client for macOS built with Fl
 - Full Microsoft Teams web experience
 - Apple Notification Center support
 - Custom user agent for compatibility
+- **Software rendering mode** for GPU compatibility issues
+- **Automatic image fix** — detects and reloads broken profile pictures and attachments
+- **Keep-alive injection** — prevents Teams from marking you as away
+- **Media permissions** — camera and microphone access handled natively
 - Lightweight (~48MB)
 
 ## Why this exists
@@ -40,6 +44,10 @@ You need [Flutter SDK](https://docs.flutter.dev/get-started/install/macos) insta
 ## How it works
 
 This app loads `https://teams.cloud.microsoft/` inside a native WebKit WebView with a Chrome user agent for full compatibility. It requests notification permissions on launch so Teams alerts appear in the macOS Notification Center.
+
+## Author
+
+Built with 💙 by [Pietro Vieira](https://github.com/pietrovieira) — macOS developer and Teams power user.
 
 ## Disclaimer
 

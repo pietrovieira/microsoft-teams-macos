@@ -73,6 +73,12 @@ class _TeamsHomePageState extends State<TeamsHomePage>
           }
         },
       )
+      ..addJavaScriptChannel(
+        'ConsoleLog',
+        onMessageReceived: (JavaScriptMessage message) {
+          debugPrint('JS Console: ${message.message}');
+        },
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (url) {
@@ -93,7 +99,7 @@ class _TeamsHomePageState extends State<TeamsHomePage>
             return NavigationDecision.navigate;
           },
           onWebResourceError: (error) {
-            debugPrint('Page load error: ${error.description} (code: ${error.errorCode})');
+            debugPrint('WebResourceError: ${error.description} (code: ${error.errorCode}, type: ${error.errorType})');
           },
         ),
       )
@@ -131,6 +137,7 @@ class _TeamsHomePageState extends State<TeamsHomePage>
   void _onPageLoaded() {
     _injectNotificationHandler();
     _injectPopupHandler();
+    _injectImageFix();
     _requestMediaAccess();
     _startKeepAlive();
     _cancelReload();
@@ -198,6 +205,97 @@ class _TeamsHomePageState extends State<TeamsHomePage>
             return { closed: false, close: function() {} };
           };
         }
+      })();
+    ''');
+  }
+
+  Future<void> _injectImageFix() async {
+    await _controller.runJavaScript('''
+      (function() {
+        if (window.__imageFixInjected) return;
+        window.__imageFixInjected = true;
+
+        var _origError = console.error;
+        var _origWarn = console.warn;
+        console.error = function() {
+          var msg = Array.from(arguments).join(' ');
+          if (window.ConsoleLog) window.ConsoleLog.postMessage('ERROR: ' + msg);
+          _origError.apply(console, arguments);
+        };
+        console.warn = function() {
+          var msg = Array.from(arguments).join(' ');
+          if (window.ConsoleLog) window.ConsoleLog.postMessage('WARN: ' + msg);
+          _origWarn.apply(console, arguments);
+        };
+
+        function reloadImage(img) {
+          var originalSrc = img.src || img.getAttribute('src');
+          if (!originalSrc || originalSrc.indexOf('data:') === 0) return false;
+          var attempts = parseInt(img.getAttribute('data-reload-attempts') || '0');
+          if (attempts >= 3) return false;
+          img.setAttribute('data-reload-attempts', (attempts + 1).toString());
+          var cleanSrc = originalSrc;
+          var idx = cleanSrc.indexOf('_t=');
+          if (idx !== -1) {
+            var before = cleanSrc.substring(0, idx);
+            var afterIdx = cleanSrc.indexOf('&', idx);
+            var after = afterIdx !== -1 ? cleanSrc.substring(afterIdx + 1) : '';
+            if (after) {
+              cleanSrc = before + after;
+            } else {
+              if (before.endsWith('?') || before.endsWith('&')) {
+                cleanSrc = before.slice(0, -1);
+              } else {
+                cleanSrc = before;
+              }
+            }
+          }
+          var separator = cleanSrc.indexOf('?') !== -1 ? '&' : '?';
+          img.src = cleanSrc + separator + '_t=' + Date.now();
+          return true;
+        }
+
+        function fixImages() {
+          var images = document.querySelectorAll('img');
+          var fixed = 0;
+          images.forEach(function(img) {
+            if (!img.complete || img.naturalWidth === 0) {
+              if (reloadImage(img)) fixed++;
+            }
+          });
+          if (window.ConsoleLog && fixed > 0) {
+            window.ConsoleLog.postMessage('Fixed ' + fixed + ' broken images');
+          }
+        }
+
+        var _originalFetch = window.fetch;
+        window.fetch = function() {
+          return _originalFetch.apply(this, arguments).catch(function(err) {
+            if (window.ConsoleLog) window.ConsoleLog.postMessage('Fetch failed: ' + err);
+            throw err;
+          });
+        };
+
+        document.addEventListener('error', function(e) {
+          var target = e.target;
+          if (target && target.tagName === 'IMG') {
+            if (window.ConsoleLog) window.ConsoleLog.postMessage('IMG ERROR: ' + target.src);
+            reloadImage(target);
+          }
+        }, true);
+
+        var observer = new MutationObserver(function(mutations) {
+          fixImages();
+        });
+        observer.observe(document.body || document.documentElement, {
+          childList: true,
+          subtree: true
+        });
+
+        setTimeout(fixImages, 1000);
+        setTimeout(fixImages, 3000);
+        setTimeout(fixImages, 5000);
+        setInterval(fixImages, 10000);
       })();
     ''');
   }
